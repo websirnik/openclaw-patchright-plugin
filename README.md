@@ -26,6 +26,11 @@ All interactive tools require a `session` key (pass your agent name → isolated
 | `stealth_wait`     | Wait for selector / load state / URL / delay |
 | `stealth_evaluate` | Run JS in the page, return the result |
 | `stealth_screenshot` | Save a screenshot |
+| `stealth_box`      | Element bounding box (for computing drag/mouse targets) |
+| `stealth_mouse_move` / `stealth_mouse_button` | Low-level trusted mouse control |
+| `stealth_drag`     | Trusted press-move-release drag (DataDome / slider captchas) |
+| `stealth_hover`    | Hover an element or coordinates |
+| `stealth_cookies_get` / `stealth_cookies_set` / `stealth_cookies_clear` | Export (incl. **httpOnly**) / import / clear cookies |
 | `stealth_status`   | List sessions / inspect one |
 | `stealth_close`    | Close a session (or all) |
 

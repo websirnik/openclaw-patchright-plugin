@@ -2,7 +2,7 @@
   "id": "patchright-stealth",
   "name": "Patchright Stealth Browser",
   "description": "Add Patchright Stealth Browser tools to OpenClaw.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -25,6 +25,14 @@
       "stealth_wait",
       "stealth_evaluate",
       "stealth_screenshot",
+      "stealth_box",
+      "stealth_mouse_move",
+      "stealth_mouse_button",
+      "stealth_drag",
+      "stealth_hover",
+      "stealth_cookies_get",
+      "stealth_cookies_set",
+      "stealth_cookies_clear",
       "stealth_status",
       "stealth_close"
     ]

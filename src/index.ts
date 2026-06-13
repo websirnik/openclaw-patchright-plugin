@@ -99,6 +99,21 @@ const sessionParam = {
   }),
 };
 
+// Cookie shape for import/export (matches Playwright's addCookies/cookies).
+const CookieSchema = Type.Object({
+  name: Type.String(),
+  value: Type.String(),
+  url: Type.Optional(Type.String()),
+  domain: Type.Optional(Type.String()),
+  path: Type.Optional(Type.String()),
+  expires: Type.Optional(Type.Number()),
+  httpOnly: Type.Optional(Type.Boolean()),
+  secure: Type.Optional(Type.Boolean()),
+  sameSite: Type.Optional(
+    Type.Union([Type.Literal("Strict"), Type.Literal("Lax"), Type.Literal("None")]),
+  ),
+});
+
 export default defineToolPlugin({
   id: "patchright-stealth",
   name: "Patchright Stealth Browser",
@@ -266,6 +281,155 @@ export default defineToolPlugin({
         const out = path ?? join(SHOT_DIR, `${id}-${Date.now()}.png`);
         await page.screenshot({ path: out, fullPage: fullPage ?? false });
         return { session: id, path: out };
+      },
+    }),
+
+    tool({
+      name: "stealth_box",
+      description:
+        "Get an element's bounding box {x,y,width,height,centerX,centerY} in viewport coordinates — " +
+        "use it to compute targets for the mouse/drag tools (e.g. a slider handle).",
+      parameters: Type.Object({
+        selector: Type.String({ description: "Playwright selector for the element." }),
+        timeoutMs: Type.Optional(Type.Number({ description: "Wait for it. Default 15000." })),
+        ...sessionParam,
+      }),
+      execute: async ({ selector, timeoutMs, session }) => {
+        const { id, page } = await activePage(session);
+        const el = page.locator(selector).first();
+        await el.waitFor({ state: "visible", timeout: timeoutMs ?? 15000 });
+        const box = await el.boundingBox();
+        if (!box) return { session: id, found: false };
+        return {
+          session: id,
+          found: true,
+          x: box.x,
+          y: box.y,
+          width: box.width,
+          height: box.height,
+          centerX: box.x + box.width / 2,
+          centerY: box.y + box.height / 2,
+        };
+      },
+    }),
+
+    tool({
+      name: "stealth_mouse_move",
+      description: "Move the mouse to viewport coordinates (x,y) over N human-like steps. Trusted input.",
+      parameters: Type.Object({
+        x: Type.Number(),
+        y: Type.Number(),
+        steps: Type.Optional(Type.Number({ description: "Intermediate steps (smoother/slower). Default 20." })),
+        ...sessionParam,
+      }),
+      execute: async ({ x, y, steps, session }) => {
+        const { id, page } = await activePage(session);
+        await page.mouse.move(x, y, { steps: steps ?? 20 });
+        return { session: id, ok: true, x, y };
+      },
+    }),
+
+    tool({
+      name: "stealth_mouse_button",
+      description: "Press or release a mouse button at the current cursor position (compose custom gestures).",
+      parameters: Type.Object({
+        action: Type.Union([Type.Literal("down"), Type.Literal("up")]),
+        button: Type.Optional(Type.Union([Type.Literal("left"), Type.Literal("right"), Type.Literal("middle")])),
+        ...sessionParam,
+      }),
+      execute: async ({ action, button, session }) => {
+        const { id, page } = await activePage(session);
+        if (action === "down") await page.mouse.down({ button: button ?? "left" });
+        else await page.mouse.up({ button: button ?? "left" });
+        return { session: id, ok: true };
+      },
+    }),
+
+    tool({
+      name: "stealth_drag",
+      description:
+        "Trusted press-move-release drag from (fromX,fromY) to (toX,toY) using real mouse input over N steps. " +
+        "Use for DataDome / slider captchas. Get coordinates from stealth_box or stealth_screenshot.",
+      parameters: Type.Object({
+        fromX: Type.Number(),
+        fromY: Type.Number(),
+        toX: Type.Number(),
+        toY: Type.Number(),
+        steps: Type.Optional(Type.Number({ description: "Move steps (more = smoother/slower). Default 25." })),
+        holdMs: Type.Optional(Type.Number({ description: "Pause after pressing, before moving. Default 0." })),
+        settleMs: Type.Optional(Type.Number({ description: "Pause at target before releasing. Default 0." })),
+        ...sessionParam,
+      }),
+      execute: async ({ fromX, fromY, toX, toY, steps, holdMs, settleMs, session }) => {
+        const { id, page } = await activePage(session);
+        await page.mouse.move(fromX, fromY, { steps: 8 });
+        await page.mouse.down();
+        if (holdMs) await page.waitForTimeout(holdMs);
+        await page.mouse.move(toX, toY, { steps: steps ?? 25 });
+        if (settleMs) await page.waitForTimeout(settleMs);
+        await page.mouse.up();
+        return { session: id, ok: true, from: { x: fromX, y: fromY }, to: { x: toX, y: toY } };
+      },
+    }),
+
+    tool({
+      name: "stealth_hover",
+      description: "Hover an element (by selector) or viewport coordinates (x,y).",
+      parameters: Type.Object({
+        selector: Type.Optional(Type.String({ description: "Element to hover." })),
+        x: Type.Optional(Type.Number()),
+        y: Type.Optional(Type.Number()),
+        ...sessionParam,
+      }),
+      execute: async ({ selector, x, y, session }) => {
+        const { id, page } = await activePage(session);
+        if (selector) await page.hover(selector);
+        else if (x !== undefined && y !== undefined) await page.mouse.move(x, y, { steps: 15 });
+        return { session: id, ok: true };
+      },
+    }),
+
+    tool({
+      name: "stealth_cookies_get",
+      description:
+        "Export this session's cookies — INCLUDING httpOnly cookies that document.cookie / stealth_evaluate " +
+        "cannot see. Returns full attributes (domain, path, expires, httpOnly, secure, sameSite).",
+      parameters: Type.Object({
+        urls: Type.Optional(Type.Array(Type.String(), { description: "Limit to these URLs. Omit for all." })),
+        ...sessionParam,
+      }),
+      execute: async ({ urls, session }) => {
+        const id = safeSession(session);
+        const sess = await ensureSession(id);
+        const cookies = urls && urls.length ? await sess.context.cookies(urls) : await sess.context.cookies();
+        return { session: id, count: cookies.length, cookies };
+      },
+    }),
+
+    tool({
+      name: "stealth_cookies_set",
+      description: "Import cookies into this session (e.g. transfer a solved/logged-in session). Uses addCookies.",
+      parameters: Type.Object({
+        cookies: Type.Array(CookieSchema, { description: "Cookies to add. Each needs name+value and url OR domain+path." }),
+        ...sessionParam,
+      }),
+      execute: async ({ cookies, session }) => {
+        const id = safeSession(session);
+        const sess = await ensureSession(id);
+        await sess.context.addCookies(cookies as Parameters<BrowserContext["addCookies"]>[0]);
+        return { session: id, added: cookies.length };
+      },
+    }),
+
+    tool({
+      name: "stealth_cookies_clear",
+      description: "Clear all cookies for this session's browser context.",
+      parameters: Type.Object({ ...sessionParam }),
+      execute: async ({ session }) => {
+        const id = safeSession(session);
+        const sess = await ensureSession(id);
+        await sess.context.clearCookies();
+        return { session: id, cleared: true };
       },
     }),
 

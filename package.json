@@ -1,6 +1,6 @@
 {
   "name": "@websirnik/patchright-stealth",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenClaw plugin: interactive stealth browser via Patchright (real Chrome, per-session isolation) for bot-detected sites.",
   "type": "module",
   "license": "MIT",

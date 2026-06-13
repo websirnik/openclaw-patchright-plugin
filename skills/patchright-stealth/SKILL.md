@@ -40,6 +40,26 @@ cookies, and login state. The call will error if you omit it — that is intenti
 8. `stealth_close { session }` when finished, to release the profile lock. Leave it open if you'll
    return soon — the profile persists on disk either way.
 
+## Slider / drag challenges (e.g. DataDome)
+
+The mouse tools dispatch **trusted** input (what anti-bot systems check for), so use them — not JS
+clicks — for slider puzzles:
+
+1. `stealth_box { session, selector }` to get the handle's `{centerX, centerY, width}` — or take a
+   `stealth_screenshot` and read coordinates visually (works even when the slider is in an iframe,
+   since drag uses viewport coordinates).
+2. `stealth_drag { session, fromX, fromY, toX, toY, steps, holdMs, settleMs }` to drag the handle.
+   Use a generous `steps` (e.g. 25–40) and small `holdMs`/`settleMs` for a human-like motion. If the
+   track length is unknown, drag toward the right edge of the slider container and let it snap.
+3. For finer control, compose `stealth_mouse_move` + `stealth_mouse_button` yourself.
+
+## Cookies
+
+`stealth_evaluate("document.cookie")` only sees JS-readable cookies — it **cannot** see `httpOnly`
+session cookies. To export a full session (e.g. after solving a challenge, to hand cookies to
+another system): use `stealth_cookies_get { session }`, which returns every cookie with full
+attributes. Use `stealth_cookies_set` to import a session, `stealth_cookies_clear` to reset.
+
 ## What NOT to do
 
 - Don't set custom user-agents/headers or inject init scripts — those re-introduce the very leaks
