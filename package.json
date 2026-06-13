@@ -1,0 +1,70 @@
+{
+  "name": "@websirnik/patchright-stealth",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin: interactive stealth browser via Patchright (real Chrome, per-session isolation) for bot-detected sites.",
+  "type": "module",
+  "license": "MIT",
+  "author": "websirnik",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/websirnik/patchright-stealth"
+  },
+  "homepage": "https://github.com/websirnik/patchright-stealth",
+  "bugs": {
+    "url": "https://github.com/websirnik/patchright-stealth/issues"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "patchright",
+    "playwright",
+    "stealth",
+    "browser",
+    "anti-bot"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "plugin:build": "npm run build && openclaw plugins build --entry ./dist/index.js",
+    "plugin:validate": "npm run build && openclaw plugins validate --entry ./dist/index.js",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "openclaw": ">=2026.5.17"
+  },
+  "dependencies": {
+    "patchright": "^1.59.1",
+    "typebox": "^1.1.38"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.21",
+    "openclaw": "latest",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.6.6"
+    },
+    "build": {
+      "openclawVersion": "2026.6.6"
+    },
+    "install": {
+      "minHostVersion": ">=2026.6.6",
+      "defaultChoice": "npm"
+    },
+    "release": {
+      "publishToClawHub": true,
+      "publishToNpm": false
+    }
+  }
+}
