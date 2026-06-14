@@ -143,6 +143,7 @@ export default defineToolPlugin({
     tools: (tool) => [
         tool({
             name: "stealth_open",
+            label: "Patchright open",
             description: "Explicitly launch a session's browser with launch-time options: proxy (with auth), extra Chrome " +
                 "args, locale, timezoneId, geolocation, and headless. Call this BEFORE stealth_navigate when you need a " +
                 "proxy. Options apply only at launch — to change them, stealth_close first. (User-Agent is intentionally " +
@@ -181,6 +182,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_navigate",
+            label: "Patchright navigate",
             description: "Open/navigate this session's stealth browser to a URL. Launches it on first use.",
             parameters: Type.Object({
                 url: Type.String({ description: "Absolute URL." }),
@@ -201,6 +203,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_content",
+            label: "Patchright content",
             description: "Read this session's current page as visible text (default) or raw HTML, truncated.",
             parameters: Type.Object({
                 html: Type.Optional(Type.Boolean({ description: "Return raw HTML instead of text." })),
@@ -216,6 +219,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_click",
+            label: "Patchright click",
             description: "Click an element by Playwright selector (CSS, text=..., role=...).",
             parameters: Type.Object({
                 selector: Type.String({ description: "e.g. 'button#login' or 'text=Sign in'." }),
@@ -230,6 +234,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_fill",
+            label: "Patchright fill",
             description: "Fill an input/textarea by selector (clears then sets value).",
             parameters: Type.Object({
                 selector: Type.String({ description: "Selector for the input." }),
@@ -245,6 +250,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_type",
+            label: "Patchright type",
             description: "Type text key-by-key with a delay (more human than fill).",
             parameters: Type.Object({
                 selector: Type.String({ description: "Selector to focus before typing." }),
@@ -260,6 +266,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_press",
+            label: "Patchright press",
             description: "Press a keyboard key (e.g. 'Enter'), optionally focusing a selector first.",
             parameters: Type.Object({
                 key: Type.String({ description: "Key name, e.g. 'Enter'." }),
@@ -277,6 +284,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_wait",
+            label: "Patchright wait",
             description: "Wait for a selector, a load state, a URL pattern, or a fixed delay.",
             parameters: Type.Object({
                 selector: Type.Optional(Type.String()),
@@ -302,6 +310,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_evaluate",
+            label: "Patchright evaluate",
             description: "Evaluate a JS expression in the page and return the JSON result. " +
                 "Runs in Patchright's isolated context; in-page console.* is unavailable.",
             parameters: Type.Object({
@@ -319,6 +328,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_screenshot",
+            label: "Patchright screenshot",
             description: "Capture a screenshot of this session's page; returns the saved file path.",
             parameters: Type.Object({
                 path: Type.Optional(Type.String({ description: "Output path. Default under ~/.openclaw/media/patchright/." })),
@@ -335,6 +345,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_box",
+            label: "Patchright box",
             description: "Get an element's bounding box {x,y,width,height,centerX,centerY} in viewport coordinates — " +
                 "use it to compute targets for the mouse/drag tools (e.g. a slider handle).",
             parameters: Type.Object({
@@ -363,6 +374,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_mouse_move",
+            label: "Patchright mouse move",
             description: "Move the mouse to viewport coordinates (x,y) over N human-like steps. Trusted input.",
             parameters: Type.Object({
                 x: Type.Number(),
@@ -378,6 +390,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_mouse_button",
+            label: "Patchright mouse button",
             description: "Press or release a mouse button at the current cursor position (compose custom gestures).",
             parameters: Type.Object({
                 action: Type.Union([Type.Literal("down"), Type.Literal("up")]),
@@ -395,6 +408,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_drag",
+            label: "Patchright drag",
             description: "Trusted press-move-release drag from (fromX,fromY) to (toX,toY) using real mouse input over N steps. " +
                 "Use for DataDome / slider captchas. Get coordinates from stealth_box or stealth_screenshot.",
             parameters: Type.Object({
@@ -422,6 +436,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_hover",
+            label: "Patchright hover",
             description: "Hover an element (by selector) or viewport coordinates (x,y).",
             parameters: Type.Object({
                 selector: Type.Optional(Type.String({ description: "Element to hover." })),
@@ -440,6 +455,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_cookies_get",
+            label: "Patchright cookies get",
             description: "Export this session's cookies — INCLUDING httpOnly cookies that document.cookie / stealth_evaluate " +
                 "cannot see. Returns full attributes (domain, path, expires, httpOnly, secure, sameSite).",
             parameters: Type.Object({
@@ -455,6 +471,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_cookies_set",
+            label: "Patchright cookies set",
             description: "Import cookies into this session (e.g. transfer a solved/logged-in session). Uses addCookies.",
             parameters: Type.Object({
                 cookies: Type.Array(CookieSchema, { description: "Cookies to add. Each needs name+value and url OR domain+path." }),
@@ -469,6 +486,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_cookies_clear",
+            label: "Patchright cookies clear",
             description: "Clear all cookies for this session's browser context.",
             parameters: Type.Object({ ...sessionParam }),
             execute: async ({ session }) => {
@@ -480,6 +498,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_status",
+            label: "Patchright status",
             description: "List active stealth sessions, or report one session's current URL/title/tab count.",
             parameters: Type.Object({
                 session: Type.Optional(Type.String({ description: "Report just this session. Omit to list all." })),
@@ -510,6 +529,7 @@ export default defineToolPlugin({
         }),
         tool({
             name: "stealth_close",
+            label: "Patchright close",
             description: "Close one session's browser (releases its profile lock), or all sessions.",
             parameters: Type.Object({
                 session: Type.Optional(Type.String({ description: "Session to close. Omit + all=true to close everything." })),
