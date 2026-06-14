@@ -34,7 +34,7 @@ function safeSession(session) {
     const s = (session ?? "default").trim() || "default";
     return s.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 64);
 }
-async function ensureSession(sessionId) {
+async function ensureSession(sessionId, opts) {
     const existing = sessions.get(sessionId);
     if (existing) {
         if (!existing.page.isClosed())
@@ -51,13 +51,35 @@ async function ensureSession(sessionId) {
     }
     const profileDir = join(PROFILE_ROOT, `patchright-stealth-profile-${sessionId}`);
     await mkdir(profileDir, { recursive: true });
-    // No custom UA, no viewport, no init scripts — Patchright's recommended config.
-    const context = await chromium.launchPersistentContext(profileDir, {
+    // Base: Patchright's recommended config (no viewport, default UA). Optional per-session
+    // launch options (proxy, args, locale/timezone/geo, UA) layered on top.
+    const launchOptions = {
         channel: CHANNEL,
-        headless: HEADLESS,
+        headless: opts?.headless ?? HEADLESS,
         viewport: null,
-    });
-    const sess = { context, page: context.pages()[0] ?? (await context.newPage()) };
+    };
+    if (opts?.proxy)
+        launchOptions.proxy = opts.proxy;
+    if (opts?.args?.length)
+        launchOptions.args = opts.args;
+    if (opts?.locale)
+        launchOptions.locale = opts.locale;
+    if (opts?.timezoneId)
+        launchOptions.timezoneId = opts.timezoneId;
+    if (opts?.geolocation) {
+        launchOptions.geolocation = opts.geolocation;
+        launchOptions.permissions = ["geolocation"];
+    }
+    if (opts?.ignoreHTTPSErrors)
+        launchOptions.ignoreHTTPSErrors = true;
+    const context = await chromium.launchPersistentContext(profileDir, launchOptions);
+    const config = {
+        proxy: opts?.proxy?.server ?? null,
+        locale: opts?.locale,
+        timezoneId: opts?.timezoneId,
+        headless: opts?.headless ?? HEADLESS,
+    };
+    const sess = { context, page: context.pages()[0] ?? (await context.newPage()), config };
     // Newest tab/popup becomes the active page for this session.
     context.on("page", (p) => {
         sess.page = p;
@@ -100,6 +122,18 @@ const CookieSchema = Type.Object({
     secure: Type.Optional(Type.Boolean()),
     sameSite: Type.Optional(Type.Union([Type.Literal("Strict"), Type.Literal("Lax"), Type.Literal("None")])),
 });
+// Proxy + geolocation shapes for per-session launch options.
+const ProxySchema = Type.Object({
+    server: Type.String({ description: "Proxy URL, e.g. http://host:port or socks5://host:port." }),
+    username: Type.Optional(Type.String()),
+    password: Type.Optional(Type.String()),
+    bypass: Type.Optional(Type.String({ description: "Comma-separated hosts to bypass the proxy for." })),
+});
+const GeoSchema = Type.Object({
+    latitude: Type.Number(),
+    longitude: Type.Number(),
+    accuracy: Type.Optional(Type.Number()),
+});
 export default defineToolPlugin({
     id: "patchright-stealth",
     name: "Patchright Stealth Browser",
@@ -107,6 +141,44 @@ export default defineToolPlugin({
         "Use for bot-detected sites (DataDome/Cloudflare/Akamai). Pass `session` = your agent name. " +
         "Separate from OpenClaw's native browser tool.",
     tools: (tool) => [
+        tool({
+            name: "stealth_open",
+            description: "Explicitly launch a session's browser with launch-time options: proxy (with auth), extra Chrome " +
+                "args, locale, timezoneId, geolocation, and headless. Call this BEFORE stealth_navigate when you need a " +
+                "proxy. Options apply only at launch — to change them, stealth_close first. (User-Agent is intentionally " +
+                "NOT overridable — Patchright's real Chrome UA is the stealthy choice.)",
+            parameters: Type.Object({
+                proxy: Type.Optional(ProxySchema),
+                args: Type.Optional(Type.Array(Type.String(), { description: "Extra Chrome flags, e.g. ['--window-size=1280,800']." })),
+                locale: Type.Optional(Type.String({ description: "e.g. 'en-US'. Match the proxy's country." })),
+                timezoneId: Type.Optional(Type.String({ description: "e.g. 'America/New_York'. A timezone/IP mismatch is a detection signal — match the proxy." })),
+                geolocation: Type.Optional(GeoSchema),
+                headless: Type.Optional(Type.Boolean({ description: "Default false (headful is less detectable)." })),
+                ignoreHTTPSErrors: Type.Optional(Type.Boolean()),
+                ...sessionParam,
+            }),
+            execute: async ({ proxy, args, locale, timezoneId, geolocation, headless, ignoreHTTPSErrors, session }) => {
+                const id = safeSession(session);
+                if (sessions.has(id)) {
+                    return {
+                        session: id,
+                        alreadyOpen: true,
+                        note: "Session already running — stealth_close it first to relaunch with different proxy/options.",
+                        config: sessions.get(id).config,
+                    };
+                }
+                const sess = await ensureSession(id, {
+                    proxy,
+                    args,
+                    locale,
+                    timezoneId,
+                    geolocation,
+                    headless,
+                    ignoreHTTPSErrors,
+                });
+                return { session: id, opened: true, config: sess.config };
+            },
+        }),
         tool({
             name: "stealth_navigate",
             description: "Open/navigate this session's stealth browser to a URL. Launches it on first use.",
@@ -418,6 +490,7 @@ export default defineToolPlugin({
                         session: id,
                         url: s.page.isClosed() ? null : s.page.url(),
                         tabs: s.context.pages().length,
+                        proxy: s.config.proxy,
                     })));
                     return { open: sessions.size, sessions: list, channel: CHANNEL, headless: HEADLESS };
                 }
@@ -425,7 +498,14 @@ export default defineToolPlugin({
                 const s = sessions.get(id);
                 if (!s || s.page.isClosed())
                     return { session: id, open: false };
-                return { session: id, open: true, url: s.page.url(), title: await s.page.title(), tabs: s.context.pages().length };
+                return {
+                    session: id,
+                    open: true,
+                    url: s.page.url(),
+                    title: await s.page.title(),
+                    tabs: s.context.pages().length,
+                    config: s.config,
+                };
             },
         }),
         tool({

@@ -60,6 +60,24 @@ session cookies. To export a full session (e.g. after solving a challenge, to ha
 another system): use `stealth_cookies_get { session }`, which returns every cookie with full
 attributes. Use `stealth_cookies_set` to import a session, `stealth_cookies_clear` to reset.
 
+## Proxies & geo (stealth_open)
+
+To route a session through a proxy, call `stealth_open` **before** the first `stealth_navigate`:
+
+```
+stealth_open { session, proxy: { server: "http://host:port", username, password },
+               timezoneId: "America/New_York", locale: "en-US" }
+```
+
+- **Match `timezoneId`/`locale` (and `geolocation` if set) to the proxy's country** — a timezone-vs-IP
+  mismatch is itself a bot signal, so a proxy with a mismatched timezone can hurt more than help.
+- Proxy and launch options are **fixed once the browser opens**. To change them, `stealth_close` then
+  `stealth_open` again.
+- Put extra Chrome flags (e.g. window size/position) in `args`.
+- **User-Agent is intentionally not overridable** — Patchright's real-Chrome UA is the stealthy choice;
+  a spoofed UA reduces stealth.
+- If you don't need a proxy, skip `stealth_open` — `stealth_navigate` auto-launches with defaults.
+
 ## What NOT to do
 
 - Don't set custom user-agents/headers or inject init scripts — those re-introduce the very leaks

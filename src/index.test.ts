@@ -5,6 +5,7 @@ import { getToolPluginMetadata } from "openclaw/plugin-sdk/tool-plugin";
 describe("patchright-stealth", () => {
   it("declares tool metadata", () => {
     expect(getToolPluginMetadata(entry)?.tools.map((tool) => tool.name)).toEqual([
+      "stealth_open",
       "stealth_navigate",
       "stealth_content",
       "stealth_click",

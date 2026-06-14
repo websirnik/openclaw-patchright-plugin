@@ -20,6 +20,7 @@ All interactive tools require a `session` key (pass your agent name → isolated
 
 | Tool | Purpose |
 |------|---------|
+| `stealth_open`     | Launch a session with **proxy** (auth), Chrome `args`, `locale`/`timezoneId`/`geolocation` |
 | `stealth_navigate` | Open/navigate to a URL |
 | `stealth_content`  | Read page text (or HTML) |
 | `stealth_click` / `stealth_fill` / `stealth_type` / `stealth_press` | Interact (Playwright selectors) |
