@@ -2,7 +2,7 @@
   "id": "patchright-stealth",
   "name": "Patchright Stealth Browser",
   "description": "Interactive stealth browser via Patchright (real Chrome, persistent profile, isolated per agent). Use for bot-detected sites (DataDome/Cloudflare/Akamai). Separate from OpenClaw's native browser tool.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "configSchema": {
     "type": "object",
     "properties": {

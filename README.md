@@ -105,7 +105,7 @@ after an agent (`patchright-stealth-profile-<agentId>…`) need no change.
 From ClawHub:
 
 ```bash
-openclaw plugins install @websirnik/patchright-stealth
+openclaw plugins install @websirnik/patchright-stealth-browser
 openclaw gateway restart
 ```
 
