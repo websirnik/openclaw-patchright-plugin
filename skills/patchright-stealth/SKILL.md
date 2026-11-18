@@ -29,7 +29,10 @@ form works on later calls.
 
 ## Operating loop
 
-1. `stealth_navigate { url }` — opens/reuses your browser and loads the page.
+1. `stealth_navigate { url }` — opens/reuses your browser and loads the page. Public `http(s)` sites
+   only. To render an HTML file from your workspace, pass its `file://` URL; it is served to Chrome
+   from `http://workspace.patchright.invalid/…`, so relative CSS and images work. Files outside your
+   workspace, `localhost` and private network addresses are blocked unless your operator allowed them.
 2. `stealth_wait { selector | state:"networkidle" | ms }` — let the page settle (challenge
    pages and SPAs need this). Waits are capped at 120 s.
 3. `stealth_content {}` — read visible text (or `html:true`) to see what's there.
@@ -84,11 +87,21 @@ If no profile fits, an inline proxy still works:
   mismatch is itself a bot signal, so a proxy with a mismatched timezone can hurt more than help.
 - Proxy and launch options are **fixed once the browser opens**. To change them, `stealth_close` then
   `stealth_open` again.
-- Put extra Chrome flags (e.g. window size/position) in `args`.
+- Put extra Chrome flags in `args`. Only display flags are accepted: `--window-size=W,H`,
+  `--window-position=X,Y`, `--force-device-scale-factor=N`, `--lang=xx-YY`, `--start-maximized`,
+  `--start-fullscreen`, `--hide-scrollbars`, `--mute-audio`, `--force-dark-mode`,
+  `--disable-notifications`.
+- An inline `proxy` may not point at a local or private address; use a configured `proxyProfile`.
 - **User-Agent is intentionally not overridable** — Patchright's real-Chrome UA is the stealthy choice;
   a spoofed UA reduces stealth.
 - If you don't need a proxy, skip `stealth_open` — `stealth_navigate` auto-launches with defaults.
 - A misnamed or unset proxy profile fails with the list of configured names.
+
+## When a call says "blocked"
+
+The page tried to reach a local or private address (directly, by redirect, or from page script), or
+a URL with a scheme other than http(s). The browser was cleared to `about:blank`. Don't retry the
+same URL; tell the user which address was blocked if the task needs it.
 
 ## What NOT to do
 

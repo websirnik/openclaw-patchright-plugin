@@ -21,8 +21,8 @@ Every tool takes an optional `session` name. Omit it for the agent's default bro
 
 | Tool | Purpose |
 |------|---------|
-| `stealth_open`     | Launch a browser with a **proxy** (`proxyProfile` from config, or inline), Chrome `args`, `locale`/`timezoneId`/`geolocation` |
-| `stealth_navigate` | Open/navigate to a URL |
+| `stealth_open`     | Launch a browser with a **proxy** (`proxyProfile` from config, or inline), display-only Chrome `args`, `locale`/`timezoneId`/`geolocation` |
+| `stealth_navigate` | Open/navigate to a public http(s) URL, or a `file://` URL inside the agent's workspace |
 | `stealth_content`  | Read page text (or HTML) |
 | `stealth_click` / `stealth_fill` / `stealth_type` / `stealth_press` | Interact (Playwright selectors) |
 | `stealth_wait`     | Wait for selector / load state / URL / delay |
@@ -59,6 +59,35 @@ name that would fall into a longer agent id's namespace (agent `shop`, session `
 All browsers are closed when the plugin instance is disposed (hot reload, replacement, gateway
 shutdown), so no orphaned Chrome keeps a profile locked.
 
+## Network and file access
+
+Stealth browsers load public websites and the calling agent's own workspace files, nothing else:
+
+- **URLs:** only `http`/`https` (plus `about:blank`). `file:`, `chrome:`, `view-source:` and other
+  schemes are refused.
+- **Addresses:** loopback, private (RFC 1918), link-local (including cloud metadata at
+  `169.254.169.254`), CGNAT, multicast, reserved and IPv6 local ranges are blocked, in every spelling
+  (`127.1`, `2130706433`, `[::ffff:127.0.0.1]`, NAT64/6to4 embeddings, hostnames that resolve to
+  them, `localhost`/`*.localhost`). This applies to every request a page makes, not only
+  `stealth_navigate`: subresources, `fetch`, iframes, popups and page-initiated navigations.
+- **Redirects:** Chrome follows redirects itself, so a redirect hop to a blocked address is detected
+  as it happens rather than prevented. The page is cleared to `about:blank` and the tool call fails
+  with the blocked URL; any result read during that call is discarded.
+- **Workspace files:** `stealth_navigate { url: "file:///…/workspace/card.html" }` works when the file
+  (after resolving symlinks) is inside the agent's workspace. Chrome never opens `file://` itself:
+  the plugin serves the workspace from the virtual origin `http://workspace.patchright.invalid/`, so
+  relative CSS, images and scripts load, and nothing outside the workspace is reachable.
+- **Chrome flags:** `stealth_open { args }` accepts only `--window-size`, `--window-position`,
+  `--force-device-scale-factor`, `--lang`, `--start-maximized`, `--start-fullscreen`,
+  `--hide-scrollbars`, `--mute-audio`, `--force-dark-mode` and `--disable-notifications`.
+- **Inline proxies** (`stealth_open { proxy }`) may not point at a local or private address. A proxy
+  running on the gateway host goes in the plugin config as a `proxyProfile`.
+
+An operator can open specific local services, or the whole private network, in the plugin config
+(see below). WebSocket connections and requests made by service workers are not intercepted, and
+addresses are checked when a request is made, so DNS rebinding can still race the check. For hard
+isolation, also run Chrome behind an egress firewall or proxy.
+
 ## Config (env vars)
 
 | Var | Default | Meaning |
@@ -67,7 +96,20 @@ shutdown), so no orphaned Chrome keeps a profile locked.
 | `PATCHRIGHT_HEADLESS` | unset (headful) | set `1` to run headless (more detectable) |
 | `PATCHRIGHT_PROFILE_ROOT` | `~/.openclaw/browser` | where per-session profiles live |
 
-## Plugin config: proxy profiles
+## Plugin config
+
+### Local services
+
+```json
+"plugins": { "entries": { "patchright-stealth": { "enabled": true, "config": {
+  "allowedPrivateHosts": ["localhost:5173", "192.168.1.20"]
+} } } }
+```
+
+`allowedPrivateHosts` takes `host` or `host:port` entries (IPv6 as `[::1]:8080`).
+`"allowPrivateNetwork": true` lifts the address block for all agents; only `http`/`https` stays enforced.
+
+### Proxy profiles
 
 Keep proxy credentials out of tool arguments (and transcripts) by naming proxies in the plugin's
 config entry in `openclaw.json`, with the password in a gateway environment variable:
@@ -89,6 +131,12 @@ Inline `proxy: { server, username, password }` still works.
 - Page-derived results (`navigate`, `content`, `evaluate`, `cookies_get`, `status`) are marked as network
   content, like the native browser tool, so the host treats them as untrusted.
 - Every tool declares an `outputSchema`, so Code Mode and Tool Search know result shapes up front.
+
+## Upgrading from 0.4.1
+
+0.4.2 enforces the network and file rules above. Agents that opened `file://` pages outside their
+workspace, local or private addresses, or passed other Chrome flags will now get an error. Add the
+services they need to `allowedPrivateHosts`.
 
 ## Upgrading from 0.3
 

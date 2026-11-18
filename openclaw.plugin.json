@@ -2,7 +2,7 @@
   "id": "patchright-stealth",
   "name": "Patchright Stealth Browser",
   "description": "Interactive stealth browser via Patchright (real Chrome, persistent profile, isolated per agent). Use for bot-detected sites (DataDome/Cloudflare/Akamai). Separate from OpenClaw's native browser tool.",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "configSchema": {
     "type": "object",
     "properties": {
@@ -35,6 +35,17 @@
           }
         },
         "description": "Named proxy profiles that agents select with stealth_open { proxyProfile }."
+      },
+      "allowPrivateNetwork": {
+        "type": "boolean",
+        "description": "Let agents reach loopback, private, link-local and other non-public addresses (default false). Prefer allowedPrivateHosts for specific services."
+      },
+      "allowedPrivateHosts": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Hosts on local or private networks agents may reach, as 'host' or 'host:port' (e.g. 'localhost:5173')."
       }
     },
     "additionalProperties": false

@@ -3,8 +3,11 @@ import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { chromium } from "patchright";
 import { homedir } from "node:os";
-import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
-import { mkdir, realpath } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { mkdir, readFile, realpath, stat } from "node:fs/promises";
+import { lookup } from "node:dns/promises";
+import { BlockList, isIP } from "node:net";
+import { fileURLToPath } from "node:url";
 /**
  * Patchright stealth browser plugin — per-agent, per-session isolated browsers.
  *
@@ -40,6 +43,13 @@ const configSchema = Type.Object({
     proxies: Type.Optional(Type.Record(Type.String(), ProxyProfileSchema, {
         description: "Named proxy profiles that agents select with stealth_open { proxyProfile }.",
     })),
+    allowPrivateNetwork: Type.Optional(Type.Boolean({
+        description: "Let agents reach loopback, private, link-local and other non-public addresses (default false). " +
+            "Prefer allowedPrivateHosts for specific services.",
+    })),
+    allowedPrivateHosts: Type.Optional(Type.Array(Type.String(), {
+        description: "Hosts on local or private networks agents may reach, as 'host' or 'host:port' (e.g. 'localhost:5173').",
+    })),
 }, { additionalProperties: false });
 /** Make an id safe to use inside a directory name. */
 function safeId(value, fallback) {
@@ -71,8 +81,360 @@ export function resolveSessionName(agentId, session, agentIds = []) {
 function profileDirFor(name) {
     return join(PROFILE_ROOT, `${PROFILE_PREFIX}${name}`);
 }
+// ----- network and file access policy -----
+/** Workspace files are served to Chrome from this virtual origin, so Chrome itself never opens file:// URLs. */
+export const WORKSPACE_ORIGIN = "http://workspace.patchright.invalid";
+const NETWORK_HINT = " (stealth browsers only load public http(s) addresses and files from your own workspace; an operator can " +
+    "allow local services with the plugin's allowedPrivateHosts or allowPrivateNetwork config)";
+const BLOCKED_NETS = new BlockList();
+for (const [net, prefix] of [
+    ["0.0.0.0", 8],
+    ["10.0.0.0", 8],
+    ["100.64.0.0", 10],
+    ["127.0.0.0", 8],
+    ["169.254.0.0", 16],
+    ["172.16.0.0", 12],
+    ["192.0.0.0", 24],
+    ["192.0.2.0", 24],
+    ["192.168.0.0", 16],
+    ["198.18.0.0", 15],
+    ["198.51.100.0", 24],
+    ["203.0.113.0", 24],
+    ["224.0.0.0", 4],
+    ["240.0.0.0", 4],
+]) {
+    BLOCKED_NETS.addSubnet(net, prefix, "ipv4");
+}
+for (const [net, prefix] of [
+    ["::", 96], // unspecified, loopback, IPv4-compatible
+    ["64:ff9b:1::", 48], // local-use NAT64
+    ["100::", 64], // discard
+    ["2001:db8::", 32], // documentation
+    ["fc00::", 7], // unique local
+    ["fe80::", 10], // link-local
+    ["fec0::", 10], // site-local (deprecated)
+    ["ff00::", 8], // multicast
+]) {
+    BLOCKED_NETS.addSubnet(net, prefix, "ipv6");
+}
+function ipv6Groups(address) {
+    let a = address.toLowerCase();
+    const dotted = a.match(/^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (dotted) {
+        const [b0, b1, b2, b3] = dotted.slice(2).map(Number);
+        a = `${dotted[1]}${((b0 << 8) | b1).toString(16)}:${((b2 << 8) | b3).toString(16)}`;
+    }
+    const halves = a.split("::");
+    if (halves.length > 2)
+        return null;
+    const head = halves[0] ? halves[0].split(":") : [];
+    const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+    const groups = halves.length === 2 ? [...head, ...Array(8 - head.length - tail.length).fill("0"), ...tail] : head;
+    if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g)))
+        return null;
+    return groups.map((g) => parseInt(g, 16));
+}
+const v4From = (hi, lo) => [hi >> 8, hi & 255, lo >> 8, lo & 255].join(".");
+/** True for loopback, private, link-local, CGNAT, multicast, reserved and other non-public addresses. */
+export function isBlockedAddress(address) {
+    const ip = address.replace(/^\[|\]$/g, "").split("%")[0];
+    const family = isIP(ip);
+    if (family === 4)
+        return BLOCKED_NETS.check(ip, "ipv4");
+    if (family !== 6)
+        return false;
+    if (BLOCKED_NETS.check(ip, "ipv6"))
+        return true; // also covers IPv4-mapped ::ffff:a.b.c.d
+    const g = ipv6Groups(ip);
+    if (!g)
+        return true;
+    if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) {
+        return BLOCKED_NETS.check(v4From(g[6], g[7]), "ipv4"); // NAT64 well-known prefix
+    }
+    if (g[0] === 0x2002)
+        return BLOCKED_NETS.check(v4From(g[1], g[2]), "ipv4"); // 6to4
+    return false;
+}
+export function netSettingsFrom(config) {
+    return {
+        allowPrivate: config?.allowPrivateNetwork === true,
+        allowHosts: (config?.allowedPrivateHosts ?? []).map((h) => h.trim().toLowerCase()).filter(Boolean),
+    };
+}
+const DNS_TTL_MS = 30_000;
+const dnsCache = new Map();
+function resolveHost(host) {
+    const hit = dnsCache.get(host);
+    if (hit && Date.now() - hit.at < DNS_TTL_MS)
+        return hit.addresses;
+    const addresses = lookup(host, { all: true, verbatim: true }).then((list) => list.map((a) => a.address));
+    const entry = { at: Date.now(), addresses };
+    dnsCache.set(host, entry);
+    if (dnsCache.size > 1000)
+        dnsCache.delete(dnsCache.keys().next().value);
+    addresses.catch(() => {
+        if (dnsCache.get(host) === entry)
+            dnsCache.delete(host);
+    });
+    return addresses;
+}
+/**
+ * Why Chrome may not load this URL, or null when it may. By default only http(s) to public
+ * addresses passes: hostnames are resolved and every address they map to is checked.
+ */
+export async function checkRemoteUrl(raw, net) {
+    let u;
+    try {
+        u = new URL(raw);
+    }
+    catch {
+        return "not a valid URL";
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:")
+        return `${u.protocol} URLs are not allowed`;
+    if (net.allowPrivate)
+        return null;
+    const hostname = u.hostname.toLowerCase().replace(/\.$/, "");
+    const port = u.port || (u.protocol === "https:" ? "443" : "80");
+    if (net.allowHosts.includes(hostname) || net.allowHosts.includes(`${hostname}:${port}`))
+        return null;
+    if (hostname === "localhost" || hostname.endsWith(".localhost"))
+        return `${hostname} is a loopback host`;
+    const bare = hostname.replace(/^\[|\]$/g, "");
+    if (isIP(bare.split("%")[0]))
+        return isBlockedAddress(bare) ? `${bare} is a local or private address` : null;
+    let addresses;
+    try {
+        addresses = await resolveHost(bare);
+    }
+    catch {
+        return null; // unresolvable here: Chrome (or its proxy) fails or resolves it on its own
+    }
+    const bad = addresses.find((a) => isBlockedAddress(a));
+    return bad ? `${hostname} resolves to local or private address ${bad}` : null;
+}
+/** A model-supplied inline proxy must not point at a local or private address (use a configured proxyProfile). */
+export async function checkProxyServer(server, net) {
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(server) ? server : `http://${server}`;
+    let u;
+    try {
+        u = new URL(withScheme);
+    }
+    catch {
+        return "not a valid proxy URL";
+    }
+    if (!u.hostname)
+        return "proxy URL has no host";
+    return checkRemoteUrl(`http://${u.hostname}${u.port ? `:${u.port}` : ""}/`, net);
+}
+/**
+ * Map a model-supplied URL to what Chrome may load: http(s) to allowed addresses as-is, a file:// URL
+ * inside the agent's workspace via the virtual workspace origin, or about:blank. Anything else is refused.
+ */
+export async function resolveNavigationTarget(raw, workspaceRoot, net) {
+    const url = raw.trim();
+    if (url === "about:blank")
+        return url;
+    let u;
+    try {
+        u = new URL(url);
+    }
+    catch {
+        throw new Error(`"${raw}" is not an absolute URL`);
+    }
+    if (u.protocol === "file:") {
+        if (!workspaceRoot)
+            throw new Error("file:// URLs need an agent workspace, and this agent has none");
+        let path;
+        try {
+            path = fileURLToPath(u);
+        }
+        catch {
+            throw new Error(`"${raw}" is not a local file URL`);
+        }
+        const real = await realpath(path).catch(() => null);
+        if (!real)
+            throw new Error(`file not found: ${path}`);
+        if (!inside(real, workspaceRoot))
+            throw new Error(`file:// URLs must point inside your workspace (${workspaceRoot})`);
+        const rel = relative(workspaceRoot, real).split(sep).map(encodeURIComponent).join("/");
+        return `${WORKSPACE_ORIGIN}/${rel}${u.search}${u.hash}`;
+    }
+    if (u.origin === WORKSPACE_ORIGIN)
+        return u.href;
+    const reason = await checkRemoteUrl(u.href, net);
+    if (reason)
+        throw new Error(`blocked ${u.href}: ${reason}${NETWORK_HINT}`);
+    return u.href;
+}
+const MAX_WORKSPACE_FILE_BYTES = 50 * 1024 * 1024;
+const CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".htm": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".json": "application/json",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".avif": "image/avif",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+    ".txt": "text/plain; charset=utf-8",
+    ".md": "text/plain; charset=utf-8",
+    ".csv": "text/csv; charset=utf-8",
+    ".pdf": "application/pdf",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+};
+/** Resolve a workspace-origin URL to a regular file inside the workspace (symlinks resolved), or null. */
+export async function workspaceFileFor(url, workspaceRoot) {
+    if (!workspaceRoot)
+        return null;
+    let pathname;
+    try {
+        const u = new URL(url);
+        if (u.origin !== WORKSPACE_ORIGIN)
+            return null;
+        pathname = decodeURIComponent(u.pathname);
+    }
+    catch {
+        return null;
+    }
+    if (pathname.includes("\0"))
+        return null;
+    const target = resolve(workspaceRoot, `.${pathname}`);
+    if (!inside(target, workspaceRoot))
+        return null;
+    const real = await realpath(target).catch(() => null);
+    if (!real || !inside(real, workspaceRoot))
+        return null;
+    const info = await stat(real).catch(() => null);
+    return info?.isFile() && info.size <= MAX_WORKSPACE_FILE_BYTES ? real : null;
+}
+const CHROME_ARG_RULES = new Map([
+    ["--window-size", /^\d{2,5},\d{2,5}$/],
+    ["--window-position", /^-?\d{1,5},-?\d{1,5}$/],
+    ["--force-device-scale-factor", /^\d{1,2}(\.\d{1,3})?$/],
+    ["--lang", /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/],
+    ["--start-maximized", null],
+    ["--start-fullscreen", null],
+    ["--hide-scrollbars", null],
+    ["--mute-audio", null],
+    ["--force-dark-mode", null],
+    ["--disable-notifications", null],
+]);
+export const ALLOWED_CHROME_ARGS = [...CHROME_ARG_RULES.keys()];
+/** Chrome flags from the model are limited to a small display-only allowlist. */
+export function checkChromeArgs(args) {
+    const out = [];
+    for (const raw of args ?? []) {
+        const arg = raw.trim();
+        const eq = arg.indexOf("=");
+        const name = eq === -1 ? arg : arg.slice(0, eq);
+        const value = eq === -1 ? undefined : arg.slice(eq + 1);
+        if (!CHROME_ARG_RULES.has(name)) {
+            throw new Error(`Chrome flag ${name} is not allowed; allowed flags: ${ALLOWED_CHROME_ARGS.join(", ")}`);
+        }
+        const rule = CHROME_ARG_RULES.get(name);
+        const ok = rule === null ? value === undefined : value !== undefined && rule.test(value);
+        if (!ok)
+            throw new Error(`invalid Chrome flag: ${raw}`);
+        out.push(arg);
+    }
+    return out;
+}
 const sessions = new Map(); // keyed by profile name
 const launching = new Map(); // in-flight launches, so parallel calls share one
+// ----- request and navigation guards -----
+function isMainFrameNavigation(req) {
+    try {
+        return req.isNavigationRequest() && req.frame() === req.frame().page().mainFrame();
+    }
+    catch {
+        return false; // service-worker requests have no frame
+    }
+}
+async function handleRoute(sess, route) {
+    const req = route.request();
+    const url = req.url();
+    try {
+        if (url.startsWith(`${WORKSPACE_ORIGIN}/`)) {
+            const file = await workspaceFileFor(url, sess.workspaceRoot);
+            if (!file) {
+                await route.fulfill({ status: 404, contentType: "text/plain; charset=utf-8", body: "Not found in the agent workspace" });
+                return;
+            }
+            const contentType = CONTENT_TYPES[extname(file).toLowerCase()] ?? "application/octet-stream";
+            await route.fulfill({ status: 200, contentType, body: await readFile(file) });
+            return;
+        }
+        const reason = await checkRemoteUrl(url, sess.net);
+        if (reason) {
+            if (isMainFrameNavigation(req))
+                sess.blocked ??= `blocked ${url}: ${reason}`;
+            await route.abort("blockedbyclient");
+            return;
+        }
+        await route.continue();
+    }
+    catch {
+        // The page or browser closed while the request was pending.
+    }
+}
+function track(sess, work) {
+    const guarded = work.catch(() => { });
+    sess.pending.add(guarded);
+    void guarded.finally(() => sess.pending.delete(guarded));
+}
+async function clearPage(sess, page, message) {
+    sess.blocked ??= message;
+    if (page && !page.isClosed())
+        await page.goto("about:blank").catch(() => { });
+}
+async function checkFrameUrl(sess, page, url) {
+    if (!url || /^(about|data|blob|chrome-error):/i.test(url) || url.startsWith(`${WORKSPACE_ORIGIN}/`))
+        return;
+    const reason = /^https?:/i.test(url) ? await checkRemoteUrl(url, sess.net) : `${url.split(":")[0]}: pages are not allowed`;
+    if (reason)
+        await clearPage(sess, page, `blocked ${url}: ${reason}`);
+}
+async function checkRedirect(sess, req) {
+    const url = req.url();
+    const reason = await checkRemoteUrl(url, sess.net);
+    if (!reason)
+        return;
+    let page;
+    try {
+        page = req.frame().page();
+    }
+    catch {
+        page = undefined;
+    }
+    await clearPage(sess, page, `blocked redirect to ${url}: ${reason}`);
+}
+function watchPage(sess, page) {
+    page.on("framenavigated", (frame) => track(sess, checkFrameUrl(sess, page, frame.url())));
+}
+/** Wait for pending address checks; throw (once) if a navigation or redirect was blocked. */
+async function settle(sess) {
+    while (sess.pending.size)
+        await Promise.allSettled([...sess.pending]);
+    if (sess.blocked) {
+        const message = sess.blocked;
+        sess.blocked = undefined;
+        throw new Error(`${message}${NETWORK_HINT}`);
+    }
+}
 async function launchSession(ref, opts) {
     const profileDir = profileDirFor(ref.name);
     await mkdir(profileDir, { recursive: true });
@@ -85,7 +447,7 @@ async function launchSession(ref, opts) {
     if (opts?.proxy)
         launchOptions.proxy = opts.proxy;
     if (opts?.args?.length)
-        launchOptions.args = opts.args;
+        launchOptions.args = checkChromeArgs(opts.args);
     if (opts?.locale)
         launchOptions.locale = opts.locale;
     if (opts?.timezoneId)
@@ -96,6 +458,8 @@ async function launchSession(ref, opts) {
     }
     if (opts?.ignoreHTTPSErrors)
         launchOptions.ignoreHTTPSErrors = true;
+    const workspaceDir = ref.owner.workspaceDir;
+    const workspaceRoot = workspaceDir ? await realpath(workspaceDir).catch(() => resolve(workspaceDir)) : undefined;
     const context = await chromium.launchPersistentContext(profileDir, launchOptions);
     const sess = {
         agentId: ref.owner.agentId,
@@ -109,9 +473,29 @@ async function launchSession(ref, opts) {
             ...(opts?.timezoneId ? { timezoneId: opts.timezoneId } : {}),
             headless: opts?.headless ?? HEADLESS,
         },
+        net: ref.net,
+        workspaceRoot,
+        pending: new Set(),
     };
+    // Every http(s) request from every page/popup goes through the address check; workspace files are
+    // served from the virtual workspace origin. Redirect hops are not routed by Playwright, so they and
+    // committed frame URLs are checked after the fact: the page is cleared and the next call reports it.
+    try {
+        await context.route("**/*", (route) => handleRoute(sess, route));
+    }
+    catch (err) {
+        await closeContext(context);
+        throw err;
+    }
+    context.on("request", (req) => {
+        if (req.redirectedFrom())
+            track(sess, checkRedirect(sess, req));
+    });
+    for (const p of context.pages())
+        watchPage(sess, p);
     // Newest tab/popup becomes the active page for this session.
     context.on("page", (p) => {
+        watchPage(sess, p);
         sess.page = p;
     });
     context.on("close", () => {
@@ -145,6 +529,7 @@ async function ensureSession(ref, opts) {
 }
 async function activePage(ref) {
     const sess = await ensureSession(ref);
+    await settle(sess);
     if (sess.page.isClosed()) {
         sess.page = sess.context.pages().at(-1) ?? (await sess.context.newPage());
     }
@@ -244,7 +629,7 @@ export async function resolveScreenshotPath(requested, owner, name) {
 /** Expressions that are function literals are called; everything else is evaluated as-is. */
 export function toEvaluationSource(expression) {
     const src = expression.trim();
-    const isFunctionLiteral = /^(async\s+)?(function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/.test(src);
+    const isFunctionLiteral = /^(async\s+)?(function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/.test(src);
     return isFunctionLiteral ? `(${src})()` : src;
 }
 function agentIdsFrom(config) {
@@ -328,8 +713,12 @@ function stealthTool(def) {
                     const runtimeConfig = toolContext.getRuntimeConfig?.() ?? toolContext.config ?? api.config;
                     const agentIds = agentIdsFrom(runtimeConfig);
                     const name = resolveSessionName(agentId, params.session, agentIds);
-                    const ref = { owner, session: name, name };
+                    const ref = { owner, session: name, name, net: netSettingsFrom(config) };
                     const result = await def.run(params, { ref, owner, signal, config, agentIds });
+                    // A navigation/redirect that lands on a blocked address during the call voids its result.
+                    const sess = sessions.get(name);
+                    if (sess)
+                        await settle(sess);
                     return jsonResult(result);
                 },
             };
@@ -342,13 +731,15 @@ const toolDefs = [
         name: "stealth_open",
         label: "Patchright open",
         description: "Explicitly launch one of your browsers with launch-time options: a proxy (prefer `proxyProfile`, a " +
-            "named proxy from the plugin config, so no password goes through tool args), extra Chrome args, locale, " +
-            "timezoneId, geolocation, headless. Call this BEFORE stealth_navigate when you need a proxy. Options apply " +
-            "only at launch — to change them, stealth_close first. (User-Agent is intentionally NOT overridable.)",
+            "named proxy from the plugin config, so no password goes through tool args), display-only Chrome flags, " +
+            "locale, timezoneId, geolocation, headless. Call this BEFORE stealth_navigate when you need a proxy. Options " +
+            "apply only at launch — to change them, stealth_close first. (User-Agent is intentionally NOT overridable.)",
         parameters: Type.Object({
             proxyProfile: Type.Optional(Type.String({ description: "Name of a proxy profile from the plugin config." })),
             proxy: Type.Optional(ProxySchema),
-            args: Type.Optional(Type.Array(Type.String(), { description: "Extra Chrome flags, e.g. ['--window-size=1280,800']." })),
+            args: Type.Optional(Type.Array(Type.String(), {
+                description: `Extra Chrome flags, only these: ${ALLOWED_CHROME_ARGS.join(", ")}. e.g. ['--window-size=1280,800'].`,
+            })),
             locale: Type.Optional(Type.String({ description: "e.g. 'en-US'. Match the proxy's country." })),
             timezoneId: Type.Optional(Type.String({ description: "e.g. 'America/New_York'. A timezone/IP mismatch is a detection signal — match the proxy." })),
             geolocation: Type.Optional(GeoSchema),
@@ -373,7 +764,13 @@ const toolDefs = [
                     config: running.config,
                 };
             }
+            const args = checkChromeArgs(p.args);
             let proxy = p.proxy;
+            if (p.proxy && !p.proxyProfile) {
+                const reason = await checkProxyServer(p.proxy.server, ref.net);
+                if (reason)
+                    throw new Error(`inline proxy ${p.proxy.server} refused: ${reason}${NETWORK_HINT}`);
+            }
             if (p.proxyProfile) {
                 if (p.proxy)
                     throw new Error("pass either proxy or proxyProfile, not both");
@@ -398,7 +795,7 @@ const toolDefs = [
             const sess = await ensureSession(ref, {
                 proxy,
                 proxyProfile: p.proxyProfile,
-                args: p.args,
+                args,
                 locale: p.locale,
                 timezoneId: p.timezoneId,
                 geolocation: p.geolocation,
@@ -411,9 +808,11 @@ const toolDefs = [
     stealthTool({
         name: "stealth_navigate",
         label: "Patchright navigate",
-        description: "Open/navigate one of your stealth browsers to a URL. Launches it on first use.",
+        description: "Open/navigate one of your stealth browsers to a URL. Launches it on first use. Public http(s) sites only; " +
+            "to render a file from your workspace pass its file:// URL (served to Chrome from " +
+            `${WORKSPACE_ORIGIN}/…). Local and private network addresses are blocked.`,
         parameters: Type.Object({
-            url: Type.String({ description: "Absolute URL." }),
+            url: Type.String({ description: "Absolute http(s) URL, or a file:// URL inside your workspace." }),
             waitUntil: Type.Optional(Type.Union([Type.Literal("load"), Type.Literal("domcontentloaded"), Type.Literal("networkidle"), Type.Literal("commit")])),
             timeoutMs: timeoutParam(30000),
             ...sessionParam,
@@ -421,8 +820,17 @@ const toolDefs = [
         outputSchema: closed({ session: Str, url: Str, title: Str, httpStatus: Type.Union([Num, Type.Null()]) }),
         network: true,
         run: async ({ url, waitUntil, timeoutMs }, { ref, signal }) => {
-            const { page } = await abortable(signal, activePage(ref));
-            const resp = await abortable(signal, page.goto(url, { waitUntil: waitUntil ?? "domcontentloaded", timeout: boundedMs(timeoutMs, 30000) }));
+            const { page, sess } = await abortable(signal, activePage(ref));
+            const target = await resolveNavigationTarget(url, sess.workspaceRoot, sess.net);
+            let resp;
+            try {
+                resp = await abortable(signal, page.goto(target, { waitUntil: waitUntil ?? "domcontentloaded", timeout: boundedMs(timeoutMs, 30000) }));
+            }
+            catch (err) {
+                await settle(sess); // a blocked redirect explains the failure better than "navigation interrupted"
+                throw err;
+            }
+            await settle(sess);
             return { session: ref.session, url: page.url(), title: await page.title(), httpStatus: resp?.status() ?? null };
         },
     }),
